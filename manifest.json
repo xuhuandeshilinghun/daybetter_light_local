@@ -1,0 +1,20 @@
+{
+  "domain": "daybetter_light_local",
+  "name": "DayBetter lights local",
+  "version": "1.0.1",
+  "dependencies": ["network"],
+  "documentation": "https://www.home-assistant.io/integrations/daybetter_light_local",
+  "issue_tracker": "https://github.com/THDayBetter/daybetter_light_local/issues",
+  "codeowners": ["@THDayBetter"],
+  "requirements": ["daybetter-local-api==1.0.6"],
+  "iot_class": "cloud_polling",
+  "config_flow": true,
+  "logos": {
+    "small": "icons/logo_hass.png",
+    "large": "icons/logo_hass.png"
+  },
+  "platforms": [
+    "light",
+    "switch"
+  ]
+}
