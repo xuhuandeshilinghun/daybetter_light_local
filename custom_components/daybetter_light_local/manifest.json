@@ -7,7 +7,7 @@
   "issue_tracker": "https://github.com/THDayBetter/daybetter_light_local/issues",
   "codeowners": ["@THDayBetter"],
   "requirements": ["daybetter-local-api==1.0.6"],
-  "iot_class": "cloud_polling",
+  "iot_class": "local_push",
   "config_flow": true,
   "logos": {
     "small": "icons/logo_hass.png",

@@ -8,11 +8,9 @@ from daybetter_local_api import DayBetterController, DayBetterDevice
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
-    CONF_DISCOVERY_INTERVAL_DEFAULT,
     CONF_LISTENING_PORT_DEFAULT,
     CONF_MULTICAST_ADDRESS_DEFAULT,
     CONF_TARGET_PORT_DEFAULT,
@@ -21,18 +19,19 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-type DayBetterLocalConfigEntry = ConfigEntry["DayBetterLocalApiCoordinator"]
+type DayBetterLocalConfigEntry = ConfigEntry[DayBetterLocalApiCoordinator]
 
 
 class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]]):
     """DayBetter light local coordinator."""
 
-    config_entry: DayBetterLocalConfigEntry
-
     def __init__(
-        self, hass: HomeAssistant, config_entry: DayBetterLocalConfigEntry
+        self,
+        hass: HomeAssistant,
+        config_entry: DayBetterLocalConfigEntry,
+        source_ips: set[str],
     ) -> None:
-        """Initialize coordinator."""
+        """Initialize my coordinator."""
         super().__init__(
             hass=hass,
             logger=_LOGGER,
@@ -41,39 +40,40 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
             update_interval=SCAN_INTERVAL,
         )
 
-        host = config_entry.data.get("host")
-        if not host:
-            raise ConfigEntryNotReady(
-                "Missing host in config entry"
-            )  # pragma: no cover
-
-        self._controller = DayBetterController(
-            loop=hass.loop,
-            logger=_LOGGER,
-            listening_address=host,
-            broadcast_address=CONF_MULTICAST_ADDRESS_DEFAULT,
-            broadcast_port=CONF_TARGET_PORT_DEFAULT,
-            listening_port=CONF_LISTENING_PORT_DEFAULT,
-            discovery_enabled=True,
-            discovery_interval=CONF_DISCOVERY_INTERVAL_DEFAULT,
-            discovered_callback=None,
-            update_enabled=False,
-        )
+        self._controllers: list[DayBetterController] = [
+            DayBetterController(
+                loop=hass.loop,
+                logger=_LOGGER,
+                listening_address=source_ip,
+                broadcast_address=CONF_MULTICAST_ADDRESS_DEFAULT,
+                broadcast_port=CONF_TARGET_PORT_DEFAULT,
+                listening_port=CONF_LISTENING_PORT_DEFAULT,
+                discovery_enabled=True,
+                discovery_interval=1,
+                update_enabled=False,
+            )
+            for source_ip in source_ips
+        ]
 
     async def start(self) -> None:
-        """Start the controller and trigger discovery."""
-        await self._controller.start()
-        self._controller.send_discovery_message()
+        """Start the DayBetter coordinator."""
+
+        for controller in self._controllers:
+            await controller.start()
+            controller.send_update_message()
 
     async def set_discovery_callback(
         self, callback: Callable[[DayBetterDevice, bool], bool]
     ) -> None:
-        """Set discovery callback for automatic device discovery."""
-        self._controller.set_device_discovered_callback(callback)
+        """Set discovery callback for automatic DayBetter light discovery."""
 
-    def cleanup(self) -> asyncio.Event:
-        """Stop and cleanup the controller. Returns an asyncio.Event when done."""
-        return self._controller.cleanup()
+        for controller in self._controllers:
+            controller.set_device_discovered_callback(callback)
+
+    def cleanup(self) -> list[asyncio.Event]:
+        """Stop and cleanup the coordinator."""
+
+        return [controller.cleanup() for controller in self._controllers]
 
     async def turn_on(self, device: DayBetterDevice) -> None:
         """Turn on the light."""
@@ -97,17 +97,20 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
         """Set light color in kelvin."""
         await device.set_temperature(temperature)
 
-    async def set_scene(self, device: DayBetterDevice, scene: str) -> None:
+    async def set_scene(self, device: DayBetterController, scene: str) -> None:
         """Set light scene."""
         await device.set_scene(scene)
 
     @property
     def devices(self) -> list[DayBetterDevice]:
-        """Return currently known devices (from latest refresh)."""
-        return self.data or list(self._controller.devices or [])
+        """Return a list of discovered DayBetter devices."""
+
+        devices: list[DayBetterDevice] = []
+        for controller in self._controllers:
+            devices = devices + controller.devices
+        return devices
 
     async def _async_update_data(self) -> list[DayBetterDevice]:
-        """Update device data from the controller."""
-        self._controller.send_update_message()
-        await asyncio.sleep(0.5)
-        return list(self._controller.devices or [])
+        for controller in self._controllers:
+            controller.send_update_message()
+        return self.devices

@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from ipaddress import IPv4Address, IPv6Address
 import logging
 
 from daybetter_local_api import DayBetterController
 
-from homeassistant.components import network
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_entry_flow
 
+from . import async_get_source_ips
 from .const import (
     CONF_LISTENING_PORT_DEFAULT,
     CONF_MULTICAST_ADDRESS_DEFAULT,
@@ -24,9 +23,7 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
-async def _async_discover(
-    hass: HomeAssistant, adapter_ip: IPv4Address | IPv6Address
-) -> bool:
+async def _async_discover(hass: HomeAssistant, adapter_ip: str) -> bool:
     controller: DayBetterController = DayBetterController(
         loop=hass.loop,
         logger=_LOGGER,
@@ -54,16 +51,17 @@ async def _async_discover(
         _LOGGER.debug("No devices found with IP %s", adapter_ip)
 
     devices_count = len(controller.devices)
-    cleanup_complete_events: list[asyncio.Event] = []
+    cleanup_complete: asyncio.Event = controller.cleanup()
     with suppress(TimeoutError):
-        await asyncio.gather(
-            *[
-                asyncio.wait_for(cleanup_complete_event.wait(), 1)
-                for cleanup_complete_event in cleanup_complete_events
-            ]
-        )
+
+
+        await asyncio.wait_for(cleanup_complete.wait(), 1)
+
+
+
 
     return devices_count > 0
+
 
 
 async def _async_has_devices(hass: HomeAssistant) -> bool:
