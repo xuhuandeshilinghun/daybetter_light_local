@@ -18,15 +18,10 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from .const import DISCOVERY_TIMEOUT
 from .coordinator import DayBetterLocalApiCoordinator, DayBetterLocalConfigEntry
 
-PLATFORMS: list[Platform] = [Platform.LIGHT]
+# 添加 Platform.SWITCH 到 PLATFORMS 列表中
+PLATFORMS: list[Platform] = [Platform.LIGHT, Platform.SWITCH]
 
 _LOGGER = logging.getLogger(__name__)
-
-
-
-
-
-
 
 async def async_setup_entry(hass: HomeAssistant, entry: DayBetterLocalConfigEntry) -> bool:
     """Set up DayBetter light local from a config entry."""
@@ -69,16 +64,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: DayBetterLocalConfigEntr
         raise ConfigEntryNotReady from ex
 
     entry.runtime_data = coordinator
+    
+    # 调试信息，查看所有发现的设备
+    for device in coordinator.devices:
+        _LOGGER.debug("Found device: SKU=%s, Fingerprint=%s, Capabilities=%s", 
+                     device.sku, device.fingerprint, 
+                     getattr(device, 'capabilities', None))
+    
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
-
-
 async def async_unload_entry(hass: HomeAssistant, entry: DayBetterLocalConfigEntry) -> bool:
-
     """Unload a config entry."""
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-
 
 async def async_get_source_ips(
     hass: HomeAssistant,

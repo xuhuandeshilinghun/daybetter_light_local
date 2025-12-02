@@ -30,6 +30,25 @@ _LOGGER = logging.getLogger(__name__)
 _NONE_SCENE = "none"
 
 
+def is_light_device(device: DayBetterDevice) -> bool:
+    """Check if the device is a light based on capabilities."""
+    # 如果设备有灯光能力，就认为是灯
+    if not hasattr(device, 'capabilities') or not device.capabilities:
+        return False
+    
+    capabilities = device.capabilities
+    # 检查是否具有任何灯光功能
+    if (DayBetterLightFeatures.BRIGHTNESS & capabilities.features or
+        DayBetterLightFeatures.COLOR_RGB & capabilities.features or
+        DayBetterLightFeatures.COLOR_KELVIN_TEMPERATURE & capabilities.features):
+        return True
+    
+    # 或者根据型号判断
+    # 假设灯的设备型号包含特定标识
+    light_skus = ["P076", "P077", "P078"]  # 添加您的灯设备型号
+    return device.sku in light_skus
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: DayBetterLocalConfigEntry,
@@ -40,14 +59,15 @@ async def async_setup_entry(
     coordinator = config_entry.runtime_data
 
     def discovery_callback(device: DayBetterDevice, is_new: bool) -> bool:
-        if is_new:  # pragma: no cover
-            async_add_entities(
-                [DayBetterLight(coordinator, device)]
-            )  # pragma: no cover
-        return True  # pragma: no cover
+        if is_new and is_light_device(device):  # 只对灯设备创建实体
+            async_add_entities([DayBetterLight(coordinator, device)])
+        return True
 
+    # 只添加灯设备
     async_add_entities(
-        DayBetterLight(coordinator, device) for device in coordinator.devices
+        DayBetterLight(coordinator, device) 
+        for device in coordinator.devices 
+        if is_light_device(device)
     )
 
     await coordinator.set_discovery_callback(discovery_callback)
@@ -122,10 +142,9 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
                 # Serial numbers are unique identifiers within a specific domain
                 (DOMAIN, device.fingerprint)
             },
-            name=device.sku,
+            name=f"{device.sku} Light",
             manufacturer=MANUFACTURER,
             model_id=device.sku,
-            # model_id='Light',  # Assuming a generic model ID for simplicity
             serial_number=device.fingerprint,
         )
 
