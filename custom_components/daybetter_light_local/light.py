@@ -45,7 +45,7 @@ def is_light_device(device: DayBetterDevice) -> bool:
     
     # 或者根据型号判断
     # 假设灯的设备型号包含特定标识
-    light_skus = ["P076", "P077", "P078"]  # 添加您的灯设备型号
+    light_skus = [ "P077", "P078"]  # 添加您的灯设备型号
     return device.sku in light_skus
 
 

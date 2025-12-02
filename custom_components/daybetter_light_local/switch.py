@@ -22,7 +22,7 @@ _LOGGER = logging.getLogger(__name__)
 def is_outlet_device(device: DayBetterDevice) -> bool:
     """Check if the device is an outlet/switch."""
     # 方法1：根据型号判断
-    outlet_skus = ["P079", "P080", "S001"]  # 假设这些是插座型号，您需要根据实际情况修改
+    outlet_skus = ["P0A1", "P0A2"]  # 假设这些是插座型号，您需要根据实际情况修改
     
     # 方法2：根据能力判断 - 如果不是灯，可能就是插座
     if hasattr(device, 'capabilities') and device.capabilities:
