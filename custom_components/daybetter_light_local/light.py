@@ -88,10 +88,13 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
         ]
         | None
     ) = None
-    _last_known_on = False
-    _last_known_brightness = 0
-    _last_known_rgb_color = None
-    _last_known_temperature_color = None
+    
+    # 本地状态缓存
+    _cached_on = False
+    _cached_brightness = 0
+    _cached_rgb_color = None
+    _cached_temperature_color = None
+    _cached_scene = None
 
     def __init__(
         self,
@@ -101,16 +104,7 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
         """DayBetter Light constructor."""
         super().__init__(coordinator)
         self._device = device
-        
-        # 设置设备更新回调
-        original_callback = getattr(device, '_update_callback', None)
-        
-        def device_update_callback(updated_device: DayBetterDevice):
-            self._handle_device_update(updated_device)
-            if original_callback:
-                original_callback(updated_device)
-        
-        device.set_update_callback(device_update_callback)
+        self._fingerprint = device.fingerprint
 
         self._attr_unique_id = device.fingerprint
         pid = ["P076"]
@@ -158,74 +152,67 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
         self._update_state_from_cache()
 
     @callback
-    def _handle_device_update(self, device: DayBetterDevice) -> None:
-        """处理设备更新"""
-        if device.fingerprint == self._device.fingerprint:
-            self._update_state_from_device(device)
-            self._attr_available = True
-            self.async_write_ha_state()
-
-    def _update_state_from_device(self, device: DayBetterDevice) -> None:
-        """从设备对象更新状态"""
-        self._last_known_on = getattr(device, 'on', False)
-        self._last_known_brightness = getattr(device, 'brightness', 0)
-        self._last_known_rgb_color = getattr(device, 'rgb_color', None)
-        self._last_known_temperature_color = getattr(device, 'temperature_color', None)
+    def _handle_state_update(self) -> None:
+        """处理状态更新（由协调器调用）"""
+        self._update_state_from_cache()
+        self.async_write_ha_state()
 
     def _update_state_from_cache(self) -> None:
         """从缓存更新状态"""
-        cached_state = self.coordinator.get_device_state(self._device.fingerprint)
+        cached_state = self.coordinator.get_cached_device_state(self._fingerprint)
         if cached_state:
-            self._last_known_on = cached_state.get('on', False)
-            self._last_known_brightness = cached_state.get('brightness', 0)
-            self._last_known_rgb_color = cached_state.get('rgb_color', None)
-            self._last_known_temperature_color = cached_state.get('temperature_color', None)
+            self._cached_on = cached_state.get('on', False)
+            self._cached_brightness = cached_state.get('brightness', 0)
+            self._cached_rgb_color = cached_state.get('rgb_color')
+            self._cached_temperature_color = cached_state.get('temperature_color')
+            self._cached_scene = cached_state.get('scene')
+            
+            if self._cached_scene and self._cached_scene != _NONE_SCENE:
+                self._attr_effect = self._cached_scene
+            else:
+                self._attr_effect = None
+            
+            _LOGGER.debug("Light %s updated from cache: on=%s, brightness=%s, rgb=%s, temp=%s",
+                         self._fingerprint, self._cached_on, self._cached_brightness,
+                         self._cached_rgb_color, self._cached_temperature_color)
 
     @property
     def available(self) -> bool:
-        """返回实体是否可用"""
-        return self.coordinator.is_device_online(self._device.fingerprint)
+        """返回实体是否可用（设备是否响应）"""
+        return self.coordinator.is_device_responding(self._fingerprint)
 
     @property
     def is_on(self) -> bool:
         """Return true if device is on (brightness above 0)."""
-        if self.available:
-            device = self.coordinator.get_device_by_fingerprint(self._device.fingerprint)
-            if device:
-                return getattr(device, 'on', False)
-        
-        return self._last_known_on
+        device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+        if device:
+            return getattr(device, 'on', self._cached_on)
+        return self._cached_on
 
     @property
     def brightness(self) -> int:
         """Return the brightness of this light between 0..255."""
-        if self.available:
-            device = self.coordinator.get_device_by_fingerprint(self._device.fingerprint)
-            if device:
-                brightness = getattr(device, 'brightness', 0)
-                return int((brightness / 100.0) * 255.0)
-        
-        return int((self._last_known_brightness / 100.0) * 255.0)
+        device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+        if device:
+            brightness = getattr(device, 'brightness', self._cached_brightness)
+            return int((brightness / 100.0) * 255.0)
+        return int((self._cached_brightness / 100.0) * 255.0)
 
     @property
     def color_temp_kelvin(self) -> int | None:
         """Return the color temperature in Kelvin."""
-        if self.available:
-            device = self.coordinator.get_device_by_fingerprint(self._device.fingerprint)
-            if device:
-                return getattr(device, 'temperature_color', None)
-        
-        return self._last_known_temperature_color
+        device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+        if device:
+            return getattr(device, 'temperature_color', self._cached_temperature_color)
+        return self._cached_temperature_color
 
     @property
     def rgb_color(self) -> tuple[int, int, int] | None:
         """Return the rgb color."""
-        if self.available:
-            device = self.coordinator.get_device_by_fingerprint(self._device.fingerprint)
-            if device:
-                return getattr(device, 'rgb_color', None)
-        
-        return self._last_known_rgb_color
+        device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+        if device:
+            return getattr(device, 'rgb_color', self._cached_rgb_color)
+        return self._cached_rgb_color
 
     @property
     def color_mode(self) -> ColorMode | str | None:
@@ -233,80 +220,103 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
         if self._fixed_color_mode:
             return self._fixed_color_mode
 
-        if self.available:
-            device = self.coordinator.get_device_by_fingerprint(self._device.fingerprint)
-            if device:
-                if (
-                    getattr(device, 'temperature_color', None) is not None
-                    and getattr(device, 'temperature_color', 0) > 0
-                ):
-                    return ColorMode.COLOR_TEMP
-                return ColorMode.RGB
+        device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+        temperature_color = None
         
-        # 离线时根据缓存判断
-        if self._last_known_temperature_color is not None and self._last_known_temperature_color > 0:
+        if device:
+            temperature_color = getattr(device, 'temperature_color', None)
+        else:
+            temperature_color = self._cached_temperature_color
+        
+        if temperature_color is not None and temperature_color > 0:
             return ColorMode.COLOR_TEMP
         return ColorMode.RGB
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the device on."""
-        if not self.available:
-            _LOGGER.warning("Device %s is offline, cannot turn on", self._device.fingerprint)
-            return
+        try:
+            if ATTR_BRIGHTNESS in kwargs:
+                brightness: int = int((float(kwargs[ATTR_BRIGHTNESS]) / 255.0) * 100.0)
+                await self.coordinator.set_brightness(self._device, brightness)
 
-        if ATTR_BRIGHTNESS in kwargs:
-            brightness: int = int((float(kwargs[ATTR_BRIGHTNESS]) / 255.0) * 100.0)
-            await self.coordinator.set_brightness(self._device, brightness)
+            if ATTR_RGB_COLOR in kwargs:
+                self._attr_color_mode = ColorMode.RGB
+                self._attr_effect = None
+                self._last_color_state = None
+                red, green, blue = kwargs[ATTR_RGB_COLOR]
+                await self.coordinator.set_rgb_color(self._device, red, green, blue)
+            elif ATTR_COLOR_TEMP_KELVIN in kwargs:
+                self._attr_color_mode = ColorMode.COLOR_TEMP
+                self._attr_effect = None
+                self._last_color_state = None
+                temperature: float = kwargs[ATTR_COLOR_TEMP_KELVIN]
+                await self.coordinator.set_temperature(self._device, int(temperature))
+            elif ATTR_EFFECT in kwargs:
+                effect = kwargs[ATTR_EFFECT]
+                if effect and self._attr_effect_list and effect in self._attr_effect_list:
+                    if effect == _NONE_SCENE:
+                        self._attr_effect = None
+                        await self._restore_last_color_state()
+                    else:
+                        self._attr_effect = effect
+                        self._save_last_color_state()
+                        await self.coordinator.set_scene(self._device, effect)
 
-        if ATTR_RGB_COLOR in kwargs:
-            self._attr_color_mode = ColorMode.RGB
-            self._attr_effect = None
-            self._last_color_state = None
-            red, green, blue = kwargs[ATTR_RGB_COLOR]
-            await self.coordinator.set_rgb_color(self._device, red, green, blue)
-        elif ATTR_COLOR_TEMP_KELVIN in kwargs:
-            self._attr_color_mode = ColorMode.COLOR_TEMP
-            self._attr_effect = None
-            self._last_color_state = None
-            temperature: float = kwargs[ATTR_COLOR_TEMP_KELVIN]
-            await self.coordinator.set_temperature(self._device, int(temperature))
-        elif ATTR_EFFECT in kwargs:
-            effect = kwargs[ATTR_EFFECT]
-            if effect and self._attr_effect_list and effect in self._attr_effect_list:
-                if effect == _NONE_SCENE:
-                    self._attr_effect = None
-                    await self._restore_last_color_state()
-                else:
-                    self._attr_effect = effect
-                    self._save_last_color_state()
-                    await self.coordinator.set_scene(self._device, effect)
+            if not self.is_on or not kwargs:
+                await self.coordinator.turn_on(self._device)
 
-        if not self.is_on or not kwargs:
-            await self.coordinator.turn_on(self._device)
-
-        self.async_write_ha_state()
+            # 本地状态立即更新
+            if ATTR_BRIGHTNESS in kwargs:
+                self._cached_brightness = int((float(kwargs[ATTR_BRIGHTNESS]) / 255.0) * 100.0)
+            self._cached_on = True
+            self.async_write_ha_state()
+            
+        except Exception as ex:
+            _LOGGER.error("Failed to control light %s: %s", self._fingerprint, ex)
+            # 即使失败也尝试从设备获取最新状态
+            await self._refresh_device_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the device off."""
-        if not self.available:
-            _LOGGER.warning("Device %s is offline, cannot turn off", self._device.fingerprint)
-            return
-            
-        await self.coordinator.turn_off(self._device)
-        self.async_write_ha_state()
+        try:
+            await self.coordinator.turn_off(self._device)
+            # 本地状态立即更新
+            self._cached_on = False
+            self.async_write_ha_state()
+        except Exception as ex:
+            _LOGGER.error("Failed to turn off light %s: %s", self._fingerprint, ex)
+            # 即使失败也尝试从设备获取最新状态
+            await self._refresh_device_state()
+
+    async def _refresh_device_state(self) -> None:
+        """刷新设备状态"""
+        try:
+            # 发送状态查询
+            for controller in self.coordinator._controllers:
+                controller.send_update_message()
+        except Exception as ex:
+            _LOGGER.debug("Error refreshing device state: %s", ex)
 
     async def async_added_to_hass(self) -> None:
         """当实体添加到HASS时调用"""
         await super().async_added_to_hass()
+        
+        # 注册到协调器，接收UDP消息通知
+        self.coordinator.register_device_entity(self._fingerprint, self._handle_state_update)
+        
         # 监听协调器更新
         self.async_on_remove(
             self.coordinator.async_add_listener(self._handle_coordinator_update)
         )
+        
+        # 移除时注销回调
+        self.async_on_remove(
+            lambda: self.coordinator.unregister_device_entity(self._fingerprint, self._handle_state_update)
+        )
     
     @callback
     def _handle_coordinator_update(self) -> None:
-        """处理协调器更新"""
-        # 更新状态缓存
+        """处理协调器定期更新"""
         self._update_state_from_cache()
         self.async_write_ha_state()
 
