@@ -22,7 +22,7 @@ _LOGGER = logging.getLogger(__name__)
 def is_plug_device(device: DayBetterDevice) -> bool:
     """Check if the device is an plug/switch."""
     # 方法1：根据型号判断
-    plug_skus = ["P0A1", "P0A2"]  # 假设这些是插座型号，您需要根据实际情况修改
+    plug_skus = ["P0AB", "P0AB"]  # 假设这些是插座型号，您需要根据实际情况修改
     
     # 方法2：根据能力判断 - 如果不是灯，可能就是插座
     if hasattr(device, 'capabilities') and device.capabilities:
@@ -100,7 +100,7 @@ class DayBetterplugSwitch(CoordinatorEntity[DayBetterLocalApiCoordinator], Switc
 
     @callback
     def _handle_state_update(self) -> None:
-        """处理状态更新（由协调器调用）"""
+        """处理状态更新"""
         self._update_state_from_cache()
         self.async_write_ha_state()
 
@@ -114,69 +114,55 @@ class DayBetterplugSwitch(CoordinatorEntity[DayBetterLocalApiCoordinator], Switc
 
     @property
     def available(self) -> bool:
-        """返回实体是否可用（设备是否响应）"""
-        return self.coordinator.is_device_responding(self._fingerprint)
+        """返回实体是否可用"""
+        return self.coordinator.is_device_active(self._fingerprint)
 
     @property
     def is_on(self) -> bool:
         """Return true if switch is on."""
-        # 首先检查设备是否在线且有实时状态
+        # 首先尝试从设备对象获取状态
         device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
         if device:
-            # 设备在线，获取实时状态
             return getattr(device, 'on', self._attr_is_on)
         
-        # 设备离线或未响应，使用缓存状态
+        # 使用缓存状态
         return self._attr_is_on
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the switch on."""
         try:
             await self.coordinator.turn_on(self._device)
-            # 本地状态立即更新
+            # 立即更新本地状态
             self._attr_is_on = True
             self.async_write_ha_state()
         except Exception as ex:
             _LOGGER.error("Failed to turn on device %s: %s", self._fingerprint, ex)
-            # 即使失败也尝试从设备获取最新状态
-            await self._refresh_device_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the switch off."""
         try:
             await self.coordinator.turn_off(self._device)
-            # 本地状态立即更新
+            # 立即更新本地状态
             self._attr_is_on = False
             self.async_write_ha_state()
         except Exception as ex:
             _LOGGER.error("Failed to turn off device %s: %s", self._fingerprint, ex)
-            # 即使失败也尝试从设备获取最新状态
-            await self._refresh_device_state()
-
-    async def _refresh_device_state(self) -> None:
-        """刷新设备状态"""
-        try:
-            # 发送状态查询
-            for controller in self.coordinator._controllers:
-                controller.send_update_message()
-        except Exception as ex:
-            _LOGGER.debug("Error refreshing device state: %s", ex)
 
     async def async_added_to_hass(self) -> None:
         """当实体添加到HASS时调用"""
         await super().async_added_to_hass()
         
-        # 注册到协调器，接收UDP消息通知
-        self.coordinator.register_device_entity(self._fingerprint, self._handle_state_update)
+        # 注册回调到协调器
+        self.coordinator.register_entity_callback(self._fingerprint, self._handle_state_update)
         
-        # 监听协调器更新
+        # 监听协调器定期更新
         self.async_on_remove(
             self.coordinator.async_add_listener(self._handle_coordinator_update)
         )
         
         # 移除时注销回调
         self.async_on_remove(
-            lambda: self.coordinator.unregister_device_entity(self._fingerprint, self._handle_state_update)
+            lambda: self.coordinator.unregister_entity_callback(self._fingerprint, self._handle_state_update)
         )
     
     @callback

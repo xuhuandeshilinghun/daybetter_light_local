@@ -59,78 +59,13 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
         
         # 设备状态缓存
         self._device_state_cache = {}
-        # 设备在线状态 - 用于标记设备是否响应
-        self._device_responded = {}
-        # 设备最后响应时间
-        self._device_last_response = {}
-        # 设备实体列表，用于通知状态更新
-        self._device_entities = {}
+        # 设备最后活跃时间
+        self._device_last_active = {}
+        # 设备实体回调注册表
+        self._device_entity_callbacks = {}
         
-        # 设置控制器消息回调
-        for controller in self._controllers:
-            controller.set_message_callback(self._handle_device_message)
-
-    @callback
-    def _handle_device_message(self, device_fingerprint: str, message_type: str, data: dict) -> None:
-        """处理设备发送的UDP消息"""
-        _LOGGER.debug("Received UDP message from device %s: %s", device_fingerprint, message_type)
-        
-        current_time = time.time()
-        
-        # 更新设备响应时间
-        self._device_last_response[device_fingerprint] = current_time
-        self._device_responded[device_fingerprint] = True
-        
-        # 根据消息类型更新状态缓存
-        if message_type == "status_update":
-            self._update_device_state_from_message(device_fingerprint, data)
-        
-        # 通知关联的实体
-        self._notify_device_entities(device_fingerprint)
-
-    def _update_device_state_from_message(self, fingerprint: str, data: dict) -> None:
-        """从UDP消息更新设备状态缓存"""
-        if fingerprint not in self._device_state_cache:
-            self._device_state_cache[fingerprint] = {}
-        
-        self._device_state_cache[fingerprint].update({
-            'on': data.get('power', False),
-            'brightness': data.get('brightness', 0),
-            'rgb_color': data.get('rgb_color'),
-            'temperature_color': data.get('temperature'),
-            'scene': data.get('scene'),
-            'last_updated': time.time(),
-            'source': 'udp'
-        })
-        
-        _LOGGER.debug("Updated state cache for device %s: %s", fingerprint, 
-                     {k: v for k, v in self._device_state_cache[fingerprint].items() 
-                      if k not in ['last_updated', 'source']})
-
-    @callback
-    def _notify_device_entities(self, fingerprint: str) -> None:
-        """通知设备关联的实体更新状态"""
-        if fingerprint in self._device_entities:
-            for entity_callback in self._device_entities[fingerprint]:
-                try:
-                    entity_callback()
-                except Exception as e:
-                    _LOGGER.error("Error notifying entity for device %s: %s", fingerprint, e)
-
-    def register_device_entity(self, fingerprint: str, entity_callback: Callable[[], None]) -> None:
-        """注册设备实体回调"""
-        if fingerprint not in self._device_entities:
-            self._device_entities[fingerprint] = []
-        
-        if entity_callback not in self._device_entities[fingerprint]:
-            self._device_entities[fingerprint].append(entity_callback)
-            _LOGGER.debug("Registered entity callback for device %s", fingerprint)
-
-    def unregister_device_entity(self, fingerprint: str, entity_callback: Callable[[], None]) -> None:
-        """注销设备实体回调"""
-        if fingerprint in self._device_entities and entity_callback in self._device_entities[fingerprint]:
-            self._device_entities[fingerprint].remove(entity_callback)
-            _LOGGER.debug("Unregistered entity callback for device %s", fingerprint)
+        # 设备发现回调
+        self._discovery_callback: Optional[Callable[[DayBetterDevice, bool], bool]] = None
 
     async def start(self) -> None:
         """Start the DayBetter coordinator."""
@@ -142,36 +77,95 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
         self, callback: Callable[[DayBetterDevice, bool], bool]
     ) -> None:
         """Set discovery callback for automatic DayBetter light discovery."""
-
-        def wrapped_callback(device: DayBetterDevice, is_new: bool) -> bool:
-            if is_new:
-                # 初始化设备状态
-                self._init_device_state(device)
-            
-            return callback(device, is_new)
-
+        self._discovery_callback = callback
+        
         for controller in self._controllers:
-            controller.set_device_discovered_callback(wrapped_callback)
+            # 设置设备发现回调
+            controller.set_device_discovered_callback(self._handle_device_discovery)
 
-    def _init_device_state(self, device: DayBetterDevice) -> None:
-        """初始化设备状态"""
+    def _handle_device_discovery(self, device: DayBetterDevice, is_new: bool) -> None:
+        """处理设备发现"""
         fingerprint = device.fingerprint
         current_time = time.time()
         
-        # 初始化状态缓存
-        self._device_state_cache[fingerprint] = {
+        # 记录设备活跃时间
+        self._device_last_active[fingerprint] = current_time
+        
+        # 初始化或更新设备状态缓存
+        self._update_device_state_cache(device)
+        
+        # 如果是新设备，初始化实体回调列表
+        if is_new and fingerprint not in self._device_entity_callbacks:
+            self._device_entity_callbacks[fingerprint] = []
+        
+        # 设置设备状态更新回调
+        def device_update_callback(updated_device: DayBetterDevice):
+            self._handle_device_update(updated_device)
+        
+        device.set_update_callback(device_update_callback)
+        
+        # 调用外部发现回调
+        if self._discovery_callback:
+            self._discovery_callback(device, is_new)
+
+    def _handle_device_update(self, device: DayBetterDevice) -> None:
+        """处理设备状态更新"""
+        fingerprint = device.fingerprint
+        current_time = time.time()
+        
+        # 更新最后活跃时间
+        self._device_last_active[fingerprint] = current_time
+        
+        # 更新状态缓存
+        self._update_device_state_cache(device)
+        
+        # 通知所有注册的实体回调
+        self._notify_entity_callbacks(fingerprint)
+        
+        _LOGGER.debug("Device %s updated: on=%s, brightness=%s", 
+                     fingerprint, getattr(device, 'on', False), 
+                     getattr(device, 'brightness', 0))
+
+    def _update_device_state_cache(self, device: DayBetterDevice) -> None:
+        """更新设备状态缓存"""
+        fingerprint = device.fingerprint
+        current_time = time.time()
+        
+        if fingerprint not in self._device_state_cache:
+            self._device_state_cache[fingerprint] = {}
+        
+        self._device_state_cache[fingerprint].update({
             'on': getattr(device, 'on', False),
             'brightness': getattr(device, 'brightness', 0),
             'rgb_color': getattr(device, 'rgb_color', None),
             'temperature_color': getattr(device, 'temperature_color', None),
             'scene': getattr(device, 'scene', None),
-            'last_updated': current_time,
-            'source': 'discovery'
-        }
+            'last_updated': current_time
+        })
+
+    def _notify_entity_callbacks(self, fingerprint: str) -> None:
+        """通知实体回调"""
+        if fingerprint in self._device_entity_callbacks:
+            for callback_func in self._device_entity_callbacks[fingerprint]:
+                try:
+                    callback_func()
+                except Exception as e:
+                    _LOGGER.error("Error notifying entity for device %s: %s", fingerprint, e)
+
+    def register_entity_callback(self, fingerprint: str, callback_func: Callable[[], None]) -> None:
+        """注册实体回调"""
+        if fingerprint not in self._device_entity_callbacks:
+            self._device_entity_callbacks[fingerprint] = []
         
-        # 初始化响应状态
-        self._device_last_response[fingerprint] = current_time
-        self._device_responded[fingerprint] = True
+        if callback_func not in self._device_entity_callbacks[fingerprint]:
+            self._device_entity_callbacks[fingerprint].append(callback_func)
+            _LOGGER.debug("Registered entity callback for device %s", fingerprint)
+
+    def unregister_entity_callback(self, fingerprint: str, callback_func: Callable[[], None]) -> None:
+        """注销实体回调"""
+        if fingerprint in self._device_entity_callbacks and callback_func in self._device_entity_callbacks[fingerprint]:
+            self._device_entity_callbacks[fingerprint].remove(callback_func)
+            _LOGGER.debug("Unregistered entity callback for device %s", fingerprint)
 
     def cleanup(self) -> list[asyncio.Event]:
         """Stop and cleanup the coordinator."""
@@ -181,30 +175,39 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
         """Turn on the light."""
         try:
             await device.turn_on()
-            # 更新缓存状态
-            self._update_device_state_from_operation(device.fingerprint, {'on': True})
+            # 立即更新缓存
+            self._device_state_cache[device.fingerprint]['on'] = True
+            self._device_state_cache[device.fingerprint]['last_updated'] = time.time()
+            # 通知实体
+            self._notify_entity_callbacks(device.fingerprint)
         except Exception as ex:
-            _LOGGER.warning("Failed to turn on device %s: %s", device.fingerprint, ex)
+            _LOGGER.error("Failed to turn on device %s: %s", device.fingerprint, ex)
             raise
 
     async def turn_off(self, device: DayBetterDevice) -> None:
         """Turn off the light."""
         try:
             await device.turn_off()
-            # 更新缓存状态
-            self._update_device_state_from_operation(device.fingerprint, {'on': False})
+            # 立即更新缓存
+            self._device_state_cache[device.fingerprint]['on'] = False
+            self._device_state_cache[device.fingerprint]['last_updated'] = time.time()
+            # 通知实体
+            self._notify_entity_callbacks(device.fingerprint)
         except Exception as ex:
-            _LOGGER.warning("Failed to turn off device %s: %s", device.fingerprint, ex)
+            _LOGGER.error("Failed to turn off device %s: %s", device.fingerprint, ex)
             raise
 
     async def set_brightness(self, device: DayBetterDevice, brightness: int) -> None:
         """Set light brightness."""
         try:
             await device.set_brightness(brightness)
-            # 更新缓存状态
-            self._update_device_state_from_operation(device.fingerprint, {'brightness': brightness})
+            # 立即更新缓存
+            self._device_state_cache[device.fingerprint]['brightness'] = brightness
+            self._device_state_cache[device.fingerprint]['last_updated'] = time.time()
+            # 通知实体
+            self._notify_entity_callbacks(device.fingerprint)
         except Exception as ex:
-            _LOGGER.warning("Failed to set brightness for device %s: %s", device.fingerprint, ex)
+            _LOGGER.error("Failed to set brightness for device %s: %s", device.fingerprint, ex)
             raise
 
     async def set_rgb_color(
@@ -213,47 +216,42 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
         """Set light RGB color."""
         try:
             await device.set_rgb_color(red, green, blue)
-            # 更新缓存状态
-            self._update_device_state_from_operation(device.fingerprint, {
-                'rgb_color': (red, green, blue),
-                'temperature_color': None  # 切换到RGB模式
-            })
+            # 立即更新缓存
+            self._device_state_cache[device.fingerprint]['rgb_color'] = (red, green, blue)
+            self._device_state_cache[device.fingerprint]['temperature_color'] = None
+            self._device_state_cache[device.fingerprint]['last_updated'] = time.time()
+            # 通知实体
+            self._notify_entity_callbacks(device.fingerprint)
         except Exception as ex:
-            _LOGGER.warning("Failed to set RGB color for device %s: %s", device.fingerprint, ex)
+            _LOGGER.error("Failed to set RGB color for device %s: %s", device.fingerprint, ex)
             raise
 
     async def set_temperature(self, device: DayBetterDevice, temperature: int) -> None:
         """Set light color in kelvin."""
         try:
             await device.set_temperature(temperature)
-            # 更新缓存状态
-            self._update_device_state_from_operation(device.fingerprint, {
-                'temperature_color': temperature,
-                'rgb_color': None  # 切换到色温模式
-            })
+            # 立即更新缓存
+            self._device_state_cache[device.fingerprint]['temperature_color'] = temperature
+            self._device_state_cache[device.fingerprint]['rgb_color'] = None
+            self._device_state_cache[device.fingerprint]['last_updated'] = time.time()
+            # 通知实体
+            self._notify_entity_callbacks(device.fingerprint)
         except Exception as ex:
-            _LOGGER.warning("Failed to set temperature for device %s: %s", device.fingerprint, ex)
+            _LOGGER.error("Failed to set temperature for device %s: %s", device.fingerprint, ex)
             raise
 
     async def set_scene(self, device: DayBetterDevice, scene: str) -> None:
         """Set light scene."""
         try:
             await device.set_scene(scene)
-            # 更新缓存状态
-            self._update_device_state_from_operation(device.fingerprint, {'scene': scene})
+            # 立即更新缓存
+            self._device_state_cache[device.fingerprint]['scene'] = scene
+            self._device_state_cache[device.fingerprint]['last_updated'] = time.time()
+            # 通知实体
+            self._notify_entity_callbacks(device.fingerprint)
         except Exception as ex:
-            _LOGGER.warning("Failed to set scene for device %s: %s", device.fingerprint, ex)
+            _LOGGER.error("Failed to set scene for device %s: %s", device.fingerprint, ex)
             raise
-
-    def _update_device_state_from_operation(self, fingerprint: str, updates: dict) -> None:
-        """从操作更新设备状态缓存"""
-        if fingerprint in self._device_state_cache:
-            self._device_state_cache[fingerprint].update(updates)
-            self._device_state_cache[fingerprint]['last_updated'] = time.time()
-            self._device_state_cache[fingerprint]['source'] = 'operation'
-            
-            # 通知实体更新
-            self._notify_device_entities(fingerprint)
 
     @property
     def devices(self) -> list[DayBetterDevice]:
@@ -271,21 +269,24 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
         for controller in self._controllers:
             controller.send_update_message()
         
-        # 检查设备响应状态
-        for fingerprint, last_response in list(self._device_last_response.items()):
-            # 如果超过60秒没有响应，认为设备离线
-            if current_time - last_response > 60:
-                self._device_responded[fingerprint] = False
-                _LOGGER.debug("Device %s marked as offline (no response for %d seconds)", 
-                             fingerprint, int(current_time - last_response))
-            else:
-                self._device_responded[fingerprint] = True
+        # 检查设备活跃状态
+        expired_devices = []
+        for fingerprint, last_active in self._device_last_active.items():
+            # 如果超过90秒没有活跃，认为设备可能离线
+            if current_time - last_active > 90:
+                _LOGGER.debug("Device %s not active for %d seconds", 
+                             fingerprint, int(current_time - last_active))
         
         return self.devices
 
-    def is_device_responding(self, fingerprint: str) -> bool:
-        """检查设备是否响应（在线）"""
-        return self._device_responded.get(fingerprint, False)
+    def is_device_active(self, fingerprint: str) -> bool:
+        """检查设备是否活跃（近期有更新）"""
+        if fingerprint not in self._device_last_active:
+            return False
+        
+        current_time = time.time()
+        # 90秒内活跃视为在线
+        return current_time - self._device_last_active[fingerprint] <= 90
 
     def get_cached_device_state(self, fingerprint: str) -> dict:
         """获取设备缓存状态"""
