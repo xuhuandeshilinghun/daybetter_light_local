@@ -172,45 +172,62 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
             else:
                 self._attr_effect = None
             
-            _LOGGER.debug("Light %s updated from cache: on=%s, brightness=%s", 
-                         self._fingerprint, self._cached_on, self._cached_brightness)
+            _LOGGER.debug("Light %s updated from cache: on=%s, brightness=%s (online: %s)", 
+                         self._fingerprint, self._cached_on, self._cached_brightness,
+                         cached_state.get('online', False))
 
     @property
     def available(self) -> bool:
-        """返回实体是否可用"""
-        return self.coordinator.is_device_active(self._fingerprint)
+        """返回实体是否可用（设备是否在线）"""
+        return self.coordinator.is_device_online(self._fingerprint)
 
     @property
     def is_on(self) -> bool:
         """Return true if device is on (brightness above 0)."""
-        device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
-        if device:
-            return getattr(device, 'on', self._cached_on)
+        # 如果设备在线，尝试从设备对象获取状态
+        if self.available:
+            device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+            if device:
+                return getattr(device, 'on', self._cached_on)
+        
+        # 设备离线，使用缓存状态
         return self._cached_on
 
     @property
     def brightness(self) -> int:
         """Return the brightness of this light between 0..255."""
-        device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
-        if device:
-            brightness = getattr(device, 'brightness', self._cached_brightness)
-            return int((brightness / 100.0) * 255.0)
+        # 如果设备在线，尝试从设备对象获取状态
+        if self.available:
+            device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+            if device:
+                brightness = getattr(device, 'brightness', self._cached_brightness)
+                return int((brightness / 100.0) * 255.0)
+        
+        # 设备离线，使用缓存状态
         return int((self._cached_brightness / 100.0) * 255.0)
 
     @property
     def color_temp_kelvin(self) -> int | None:
         """Return the color temperature in Kelvin."""
-        device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
-        if device:
-            return getattr(device, 'temperature_color', self._cached_temperature_color)
+        # 如果设备在线，尝试从设备对象获取状态
+        if self.available:
+            device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+            if device:
+                return getattr(device, 'temperature_color', self._cached_temperature_color)
+        
+        # 设备离线，使用缓存状态
         return self._cached_temperature_color
 
     @property
     def rgb_color(self) -> tuple[int, int, int] | None:
         """Return the rgb color."""
-        device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
-        if device:
-            return getattr(device, 'rgb_color', self._cached_rgb_color)
+        # 如果设备在线，尝试从设备对象获取状态
+        if self.available:
+            device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+            if device:
+                return getattr(device, 'rgb_color', self._cached_rgb_color)
+        
+        # 设备离线，使用缓存状态
         return self._cached_rgb_color
 
     @property
@@ -219,7 +236,7 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
         if self._fixed_color_mode:
             return self._fixed_color_mode
 
-        # 检查当前颜色模式
+        # 检查当前颜色模式（优先使用缓存）
         if self._cached_temperature_color is not None and self._cached_temperature_color > 0:
             return ColorMode.COLOR_TEMP
         elif self._cached_rgb_color is not None:
@@ -230,6 +247,10 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the device on."""
+        if not self.available:
+            _LOGGER.warning("Cannot control device %s - device is offline", self._fingerprint)
+            return
+            
         try:
             if ATTR_BRIGHTNESS in kwargs:
                 brightness: int = int((float(kwargs[ATTR_BRIGHTNESS]) / 255.0) * 100.0)
@@ -284,6 +305,10 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the device off."""
+        if not self.available:
+            _LOGGER.warning("Cannot turn off device %s - device is offline", self._fingerprint)
+            return
+            
         try:
             await self.coordinator.turn_off(self._device)
             # 立即更新本地缓存

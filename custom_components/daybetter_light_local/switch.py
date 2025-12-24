@@ -22,7 +22,7 @@ _LOGGER = logging.getLogger(__name__)
 def is_plug_device(device: DayBetterDevice) -> bool:
     """Check if the device is an plug/switch."""
     # 方法1：根据型号判断
-    plug_skus = ["P0AB", "P0AB"]  # 假设这些是插座型号，您需要根据实际情况修改
+    plug_skus = ["P0AB", "P0AC"]  # 假设这些是插座型号，您需要根据实际情况修改
     
     # 方法2：根据能力判断 - 如果不是灯，可能就是插座
     if hasattr(device, 'capabilities') and device.capabilities:
@@ -109,27 +109,33 @@ class DayBetterplugSwitch(CoordinatorEntity[DayBetterLocalApiCoordinator], Switc
         cached_state = self.coordinator.get_cached_device_state(self._fingerprint)
         if cached_state:
             self._attr_is_on = cached_state.get('on', False)
-            _LOGGER.debug("Switch %s updated from cache: %s", 
-                         self._fingerprint, self._attr_is_on)
+            _LOGGER.debug("Switch %s updated from cache: %s (online: %s)", 
+                         self._fingerprint, self._attr_is_on, 
+                         cached_state.get('online', False))
 
     @property
     def available(self) -> bool:
-        """返回实体是否可用"""
-        return self.coordinator.is_device_active(self._fingerprint)
+        """返回实体是否可用（设备是否在线）"""
+        return self.coordinator.is_device_online(self._fingerprint)
 
     @property
     def is_on(self) -> bool:
         """Return true if switch is on."""
-        # 首先尝试从设备对象获取状态
-        device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
-        if device:
-            return getattr(device, 'on', self._attr_is_on)
+        # 如果设备在线，尝试从设备对象获取状态
+        if self.available:
+            device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+            if device:
+                return getattr(device, 'on', self._attr_is_on)
         
-        # 使用缓存状态
+        # 设备离线，使用缓存状态
         return self._attr_is_on
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the switch on."""
+        if not self.available:
+            _LOGGER.warning("Cannot turn on device %s - device is offline", self._fingerprint)
+            return
+            
         try:
             await self.coordinator.turn_on(self._device)
             # 立即更新本地状态
@@ -140,6 +146,10 @@ class DayBetterplugSwitch(CoordinatorEntity[DayBetterLocalApiCoordinator], Switc
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the switch off."""
+        if not self.available:
+            _LOGGER.warning("Cannot turn off device %s - device is offline", self._fingerprint)
+            return
+            
         try:
             await self.coordinator.turn_off(self._device)
             # 立即更新本地状态
