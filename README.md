@@ -29,7 +29,7 @@ Before installing this integration, you need to:
 
 ### Manual Installation
 
-1. Download the `custom_components/daybetter_services` folder
+1. Download the `custom_components/daybetter_light_local` folder
 2. Copy it to your Home Assistant's `custom_components` directory
 3. Restart Home Assistant
 
@@ -44,8 +44,8 @@ Before installing this integration, you need to:
 ## Support
 
 If you encounter any issues or have questions:
-1. Check the [documentation](https://github.com/THDayBetter/daybetter_service/wiki)
-2. Open an [issue](https://github.com/THDayBetter/daybetter_service/issues) on GitHub
+1. Check the [documentation](https://github.com/THDayBetter/daybetter_light_local/wiki)
+2. Open an [issue](https://github.com/THDayBetter/daybetter_light_local/issues) on GitHub
 
 ## License
 
@@ -53,5 +53,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 [hacs-badge]: https://img.shields.io/badge/HACS-Custom-orange.svg
 [hacs-url]: https://github.com/custom-components/hacs
-[releases-badge]: https://img.shields.io/github/release/THDayBetter/daybetter_service.svg
-[releases-url]: https://github.com/THDayBetter/daybetter_service/releases
+[releases-badge]: https://img.shields.io/github/release/THDayBetter/daybetter_light_local.svg
+[releases-url]: https://github.com/THDayBetter/daybetter_light_local/releases
