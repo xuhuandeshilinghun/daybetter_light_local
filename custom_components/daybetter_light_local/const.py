@@ -14,4 +14,4 @@ SCAN_INTERVAL = timedelta(seconds=30)
 DISCOVERY_TIMEOUT = 5
 
 # 设备离线阈值（秒）
-DEVICE_OFFLINE_THRESHOLD = 60  # 60秒内无响应认为离线
+DEVICE_OFFLINE_THRESHOLD = 20  # 20秒内无响应认为离线
