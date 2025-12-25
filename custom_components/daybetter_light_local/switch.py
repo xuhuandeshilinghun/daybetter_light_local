@@ -53,12 +53,32 @@ async def async_setup_entry(
             async_add_entities([DayBetterplugSwitch(coordinator, device)])
         return True
 
-    # 为现有的插座设备创建开关实体
-    async_add_entities(
-        DayBetterplugSwitch(coordinator, device) 
-        for device in coordinator.devices 
-        if is_plug_device(device)
-    )
+    # 首先为所有已知设备创建实体（包括可能已经离线但已知的设备）
+    all_known_devices = coordinator.get_all_known_devices()
+    
+    # 为当前发现的设备创建实体
+    for device in coordinator.devices:
+        if is_plug_device(device):
+            async_add_entities([DayBetterplugSwitch(coordinator, device)])
+    
+    # 为已缓存但当前未发现的设备创建实体
+    for fingerprint in all_known_devices:
+        cached_state = coordinator.get_cached_device_state(fingerprint)
+        if cached_state and 'sku' in cached_state:
+            # 检查是否是插座设备
+            sku = cached_state.get('sku', '')
+            # 简单通过SKU判断是否为插座
+            if sku in ["P0AB", "P0AC"]:
+                # 创建虚拟设备对象来保存必要信息
+                class VirtualDevice:
+                    def __init__(self, fingerprint, sku):
+                        self.fingerprint = fingerprint
+                        self.sku = sku
+                        self.on = False
+                
+                virtual_device = VirtualDevice(fingerprint, sku)
+                async_add_entities([DayBetterplugSwitch(coordinator, virtual_device)])
+                _LOGGER.info("Created entity for offline plug device: %s", fingerprint)
 
     await coordinator.set_discovery_callback(discovery_callback)
 
@@ -69,6 +89,7 @@ class DayBetterplugSwitch(CoordinatorEntity[DayBetterLocalApiCoordinator], Switc
     _attr_has_entity_name = True
     _attr_name = None
     _attr_is_on = False
+    _cached_sku = ""
 
     def __init__(
         self,
@@ -79,36 +100,46 @@ class DayBetterplugSwitch(CoordinatorEntity[DayBetterLocalApiCoordinator], Switc
         super().__init__(coordinator)
         self._device = device
         self._fingerprint = device.fingerprint
+        self._cached_sku = getattr(device, 'sku', 'Unknown')
 
         self._attr_unique_id = device.fingerprint + "_plug"
+        
+        # 如果设备有实际对象，设置更新回调
+        if hasattr(device, 'set_update_callback'):
+            def device_update_callback(updated_device: DayBetterDevice):
+                self._handle_device_update(updated_device)
+            
+            device.set_update_callback(device_update_callback)
         
         # 为插座创建独立的设备信息
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, device.fingerprint + "_plug")},  # 使用不同的标识符
-            name=f"{device.sku} Plug",
+            name=f"{self._cached_sku} Plug",
             manufacturer=MANUFACTURER,
-            model_id=device.sku,
+            model_id=self._cached_sku,
             serial_number=device.fingerprint,
             via_device=(DOMAIN, device.fingerprint) if hasattr(device, 'parent_device') else None,
         )
         
         _LOGGER.debug("Created plug switch for device: %s (SKU: %s)", 
-                     device.fingerprint, device.sku)
+                     device.fingerprint, self._cached_sku)
         
         # 初始化状态
         self._update_state_from_cache()
 
     @callback
-    def _handle_state_update(self) -> None:
-        """处理状态更新"""
-        self._update_state_from_cache()
-        self.async_write_ha_state()
+    def _handle_device_update(self, device: DayBetterDevice) -> None:
+        """处理设备更新"""
+        if device.fingerprint == self._fingerprint:
+            self._update_state_from_cache()
+            self.async_write_ha_state()
 
     def _update_state_from_cache(self) -> None:
         """从缓存更新状态"""
         cached_state = self.coordinator.get_cached_device_state(self._fingerprint)
         if cached_state:
             self._attr_is_on = cached_state.get('on', False)
+            self._cached_sku = cached_state.get('sku', self._cached_sku)
             _LOGGER.debug("Switch %s updated from cache: %s (online: %s)", 
                          self._fingerprint, self._attr_is_on, 
                          cached_state.get('online', False))
@@ -116,16 +147,15 @@ class DayBetterplugSwitch(CoordinatorEntity[DayBetterLocalApiCoordinator], Switc
     @property
     def available(self) -> bool:
         """返回实体是否可用（设备是否在线）"""
+        # 实体总是可用的，即使设备离线
         return self.coordinator.is_device_online(self._fingerprint)
 
     @property
     def is_on(self) -> bool:
         """Return true if switch is on."""
         # 如果设备在线，尝试从设备对象获取状态
-        if self.available:
-            device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
-            if device:
-                return getattr(device, 'on', self._attr_is_on)
+        if self.available and hasattr(self._device, 'on'):
+            return getattr(self._device, 'on', self._attr_is_on)
         
         # 设备离线，使用缓存状态
         return self._attr_is_on
@@ -137,6 +167,16 @@ class DayBetterplugSwitch(CoordinatorEntity[DayBetterLocalApiCoordinator], Switc
             return
             
         try:
+            # 如果设备没有实际对象，需要先获取
+            if not hasattr(self._device, 'turn_on'):
+                # 尝试从协调器获取实际设备
+                real_device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+                if real_device:
+                    self._device = real_device
+                else:
+                    _LOGGER.error("Device %s not found, cannot control", self._fingerprint)
+                    return
+            
             await self.coordinator.turn_on(self._device)
             # 立即更新本地状态
             self._attr_is_on = True
@@ -151,6 +191,16 @@ class DayBetterplugSwitch(CoordinatorEntity[DayBetterLocalApiCoordinator], Switc
             return
             
         try:
+            # 如果设备没有实际对象，需要先获取
+            if not hasattr(self._device, 'turn_off'):
+                # 尝试从协调器获取实际设备
+                real_device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+                if real_device:
+                    self._device = real_device
+                else:
+                    _LOGGER.error("Device %s not found, cannot control", self._fingerprint)
+                    return
+            
             await self.coordinator.turn_off(self._device)
             # 立即更新本地状态
             self._attr_is_on = False
@@ -163,7 +213,7 @@ class DayBetterplugSwitch(CoordinatorEntity[DayBetterLocalApiCoordinator], Switc
         await super().async_added_to_hass()
         
         # 注册回调到协调器
-        self.coordinator.register_entity_callback(self._fingerprint, self._handle_state_update)
+        self.coordinator.register_device_entity(self._fingerprint, self._handle_state_update)
         
         # 监听协调器定期更新
         self.async_on_remove(
@@ -172,8 +222,14 @@ class DayBetterplugSwitch(CoordinatorEntity[DayBetterLocalApiCoordinator], Switc
         
         # 移除时注销回调
         self.async_on_remove(
-            lambda: self.coordinator.unregister_entity_callback(self._fingerprint, self._handle_state_update)
+            lambda: self.coordinator.unregister_device_entity(self._fingerprint, self._handle_state_update)
         )
+    
+    @callback
+    def _handle_state_update(self) -> None:
+        """处理状态更新（协调器调用）"""
+        self._update_state_from_cache()
+        self.async_write_ha_state()
     
     @callback
     def _handle_coordinator_update(self) -> None:

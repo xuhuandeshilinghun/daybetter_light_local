@@ -61,7 +61,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: DayBetterLocalConfigEntr
             while not coordinator.devices:
                 await asyncio.sleep(delay=1)
     except TimeoutError as ex:
-        raise ConfigEntryNotReady from ex
+        # 不抛出异常，允许集成继续运行，即使没有发现设备
+        _LOGGER.warning("No devices discovered during initial setup")
+        # 不抛出异常，让集成继续运行，这样已经发现的设备不会丢失
+        pass
 
     entry.runtime_data = coordinator
     
@@ -72,6 +75,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: DayBetterLocalConfigEntr
                      getattr(device, 'capabilities', None))
     
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    
+    # 启动设备状态监控
+    asyncio.create_task(coordinator.monitor_devices())
+    
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: DayBetterLocalConfigEntry) -> bool:
