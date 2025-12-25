@@ -59,7 +59,7 @@ async def async_setup_entry(
             async_add_entities([DayBetterLight(coordinator, device)])
         return True
 
-    # 首先为所有已知设备创建实体（包括可能已经离线但已知的设备）
+    # 首先为所有已知设备创建实体
     all_known_devices = coordinator.get_all_known_devices()
     
     # 为当前发现的设备创建实体
@@ -67,30 +67,6 @@ async def async_setup_entry(
         if is_light_device(device):
             async_add_entities([DayBetterLight(coordinator, device)])
     
-    # 为已缓存但当前未发现的设备创建实体
-    for fingerprint in all_known_devices:
-        cached_state = coordinator.get_cached_device_state(fingerprint)
-        if cached_state and 'sku' in cached_state:
-            # 检查是否是灯设备
-            sku = cached_state.get('sku', '')
-            # 简单通过SKU判断是否为灯
-            if sku in ["P076", "P077", "P078"]:
-                # 创建虚拟设备对象来保存必要信息
-                class VirtualDevice:
-                    def __init__(self, fingerprint, sku):
-                        self.fingerprint = fingerprint
-                        self.sku = sku
-                        self.on = False
-                        self.brightness = 0
-                        self.rgb_color = None
-                        self.temperature_color = None
-                        self.scene = None
-                        self.capabilities = None
-                
-                virtual_device = VirtualDevice(fingerprint, sku)
-                async_add_entities([DayBetterLight(coordinator, virtual_device)])
-                _LOGGER.info("Created entity for offline light device: %s", fingerprint)
-
     await coordinator.set_discovery_callback(discovery_callback)
 
 
@@ -135,11 +111,11 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
 
         self._attr_unique_id = device.fingerprint
         
-        # 如果设备有实际对象，设置更新回调
+        # 设置设备更新回调
+        def device_update_callback(updated_device: DayBetterDevice):
+            self._handle_device_update(updated_device)
+        
         if hasattr(device, 'set_update_callback'):
-            def device_update_callback(updated_device: DayBetterDevice):
-                self._handle_device_update(updated_device)
-            
             device.set_update_callback(device_update_callback)
 
         # 初始化设备能力
@@ -208,10 +184,17 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
 
     @callback
     def _handle_device_update(self, device: DayBetterDevice) -> None:
-        """处理设备更新"""
+        """处理设备更新（通过UDP消息）"""
         if device.fingerprint == self._fingerprint:
+            _LOGGER.debug("Light %s received UDP update", self._fingerprint)
             self._update_state_from_cache()
             self.async_write_ha_state()
+
+    @callback
+    def _handle_state_update(self) -> None:
+        """处理状态更新（由协调器调用）"""
+        self._update_state_from_cache()
+        self.async_write_ha_state()
 
     def _update_state_from_cache(self) -> None:
         """从缓存更新状态"""
@@ -228,25 +211,20 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
                 self._attr_effect = self._cached_scene
             else:
                 self._attr_effect = None
-            
-            _LOGGER.debug("Light %s updated from cache: on=%s, brightness=%s, online=%s", 
-                         self._fingerprint, self._cached_on, self._cached_brightness,
-                         cached_state.get('online', False))
 
     @property
     def available(self) -> bool:
         """返回实体是否可用（设备是否在线）"""
-        # 实体总是可用的，即使设备离线
-        # Home Assistant会在UI中正确显示离线状态
-        # 只要实体存在，用户就能看到设备的最后状态
         return self.coordinator.is_device_online(self._fingerprint)
 
     @property
     def is_on(self) -> bool:
         """Return true if device is on (brightness above 0)."""
         # 如果设备在线，尝试从设备对象获取状态
-        if self.available and hasattr(self._device, 'on'):
-            return getattr(self._device, 'on', self._cached_on)
+        if self.available:
+            device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+            if device:
+                return getattr(device, 'on', self._cached_on)
         
         # 设备离线，使用缓存状态
         return self._cached_on
@@ -255,9 +233,11 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
     def brightness(self) -> int:
         """Return the brightness of this light between 0..255."""
         # 如果设备在线，尝试从设备对象获取状态
-        if self.available and hasattr(self._device, 'brightness'):
-            brightness = getattr(self._device, 'brightness', self._cached_brightness)
-            return int((brightness / 100.0) * 255.0)
+        if self.available:
+            device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+            if device:
+                brightness = getattr(device, 'brightness', self._cached_brightness)
+                return int((brightness / 100.0) * 255.0)
         
         # 设备离线，使用缓存状态
         return int((self._cached_brightness / 100.0) * 255.0)
@@ -266,8 +246,10 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
     def color_temp_kelvin(self) -> int | None:
         """Return the color temperature in Kelvin."""
         # 如果设备在线，尝试从设备对象获取状态
-        if self.available and hasattr(self._device, 'temperature_color'):
-            return getattr(self._device, 'temperature_color', self._cached_temperature_color)
+        if self.available:
+            device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+            if device:
+                return getattr(device, 'temperature_color', self._cached_temperature_color)
         
         # 设备离线，使用缓存状态
         return self._cached_temperature_color
@@ -276,8 +258,10 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
     def rgb_color(self) -> tuple[int, int, int] | None:
         """Return the rgb color."""
         # 如果设备在线，尝试从设备对象获取状态
-        if self.available and hasattr(self._device, 'rgb_color'):
-            return getattr(self._device, 'rgb_color', self._cached_rgb_color)
+        if self.available:
+            device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+            if device:
+                return getattr(device, 'rgb_color', self._cached_rgb_color)
         
         # 设备离线，使用缓存状态
         return self._cached_rgb_color
@@ -304,32 +288,28 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
             return
             
         try:
-            # 如果设备没有实际对象，需要先获取
-            if not hasattr(self._device, 'turn_on'):
-                # 尝试从协调器获取实际设备
-                real_device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
-                if real_device:
-                    self._device = real_device
-                else:
-                    _LOGGER.error("Device %s not found, cannot control", self._fingerprint)
-                    return
+            # 获取实际设备对象
+            real_device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+            if not real_device:
+                _LOGGER.error("Device %s not found, cannot control", self._fingerprint)
+                return
             
             if ATTR_BRIGHTNESS in kwargs:
                 brightness: int = int((float(kwargs[ATTR_BRIGHTNESS]) / 255.0) * 100.0)
-                await self.coordinator.set_brightness(self._device, brightness)
+                await self.coordinator.set_brightness(real_device, brightness)
 
             if ATTR_RGB_COLOR in kwargs:
                 self._attr_color_mode = ColorMode.RGB
                 self._attr_effect = None
                 self._last_color_state = None
                 red, green, blue = kwargs[ATTR_RGB_COLOR]
-                await self.coordinator.set_rgb_color(self._device, red, green, blue)
+                await self.coordinator.set_rgb_color(real_device, red, green, blue)
             elif ATTR_COLOR_TEMP_KELVIN in kwargs:
                 self._attr_color_mode = ColorMode.COLOR_TEMP
                 self._attr_effect = None
                 self._last_color_state = None
                 temperature: float = kwargs[ATTR_COLOR_TEMP_KELVIN]
-                await self.coordinator.set_temperature(self._device, int(temperature))
+                await self.coordinator.set_temperature(real_device, int(temperature))
             elif ATTR_EFFECT in kwargs:
                 effect = kwargs[ATTR_EFFECT]
                 if effect and self._attr_effect_list and effect in self._attr_effect_list:
@@ -339,10 +319,10 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
                     else:
                         self._attr_effect = effect
                         self._save_last_color_state()
-                        await self.coordinator.set_scene(self._device, effect)
+                        await self.coordinator.set_scene(real_device, effect)
 
             if not self.is_on or not kwargs:
-                await self.coordinator.turn_on(self._device)
+                await self.coordinator.turn_on(real_device)
 
             # 立即更新本地缓存
             if ATTR_BRIGHTNESS in kwargs:
@@ -372,17 +352,13 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
             return
             
         try:
-            # 如果设备没有实际对象，需要先获取
-            if not hasattr(self._device, 'turn_off'):
-                # 尝试从协调器获取实际设备
-                real_device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
-                if real_device:
-                    self._device = real_device
-                else:
-                    _LOGGER.error("Device %s not found, cannot control", self._fingerprint)
-                    return
+            # 获取实际设备对象
+            real_device = self.coordinator.get_device_by_fingerprint(self._fingerprint)
+            if not real_device:
+                _LOGGER.error("Device %s not found, cannot control", self._fingerprint)
+                return
             
-            await self.coordinator.turn_off(self._device)
+            await self.coordinator.turn_off(real_device)
             # 立即更新本地缓存
             self._cached_on = False
             self.async_write_ha_state()
@@ -405,12 +381,6 @@ class DayBetterLight(CoordinatorEntity[DayBetterLocalApiCoordinator], LightEntit
         self.async_on_remove(
             lambda: self.coordinator.unregister_device_entity(self._fingerprint, self._handle_state_update)
         )
-    
-    @callback
-    def _handle_state_update(self) -> None:
-        """处理状态更新（协调器调用）"""
-        self._update_state_from_cache()
-        self.async_write_ha_state()
     
     @callback
     def _handle_coordinator_update(self) -> None:

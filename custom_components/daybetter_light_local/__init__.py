@@ -76,9 +76,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: DayBetterLocalConfigEntr
     
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     
-    # 启动设备状态监控
-    asyncio.create_task(coordinator.monitor_devices())
-    
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: DayBetterLocalConfigEntry) -> bool:

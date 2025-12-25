@@ -10,9 +10,10 @@ CONF_TARGET_PORT_DEFAULT = 6281
 CONF_LISTENING_PORT_DEFAULT = 6282
 CONF_DISCOVERY_INTERVAL_DEFAULT = 60
 
-# SCAN_INTERVAL = timedelta(seconds=30)
-SCAN_INTERVAL = timedelta(seconds=10)
+SCAN_INTERVAL = timedelta(seconds=30)
 DISCOVERY_TIMEOUT = 5
 
-# 设备离线阈值（秒）
+# 设备离线阈值（秒）- 调整为10秒
 DEVICE_OFFLINE_THRESHOLD = 10  # 10秒内无响应认为离线
+# 快速检查间隔（秒）
+QUICK_CHECK_INTERVAL = 5  # 5秒快速检查一次

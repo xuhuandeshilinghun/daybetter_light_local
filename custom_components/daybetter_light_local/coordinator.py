@@ -17,6 +17,8 @@ from .const import (
     CONF_MULTICAST_ADDRESS_DEFAULT,
     CONF_TARGET_PORT_DEFAULT,
     SCAN_INTERVAL,
+    DEVICE_OFFLINE_THRESHOLD,
+    QUICK_CHECK_INTERVAL,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -57,14 +59,16 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
             for source_ip in source_ips
         ]
         
-        # 设备状态缓存 - 即使设备离线也保留
+        # 设备状态缓存
         self._device_state_cache = {}
         # 设备最后响应时间
         self._device_last_response = {}
         # 设备实体回调注册表
         self._device_entity_callbacks = {}
-        # 已知设备指纹列表（即使离线也保留）
+        # 已知设备列表
         self._known_devices = set()
+        # 快速检查任务
+        self._quick_check_task = None
         
         # 设备发现回调
         self._discovery_callback: Optional[Callable[[DayBetterDevice, bool], bool]] = None
@@ -74,6 +78,9 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
         for controller in self._controllers:
             await controller.start()
             controller.send_update_message()
+        
+        # 启动快速检查任务
+        self._quick_check_task = asyncio.create_task(self._quick_check_loop())
 
     async def set_discovery_callback(
         self, callback: Callable[[DayBetterDevice, bool], bool]
@@ -82,12 +89,15 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
         self._discovery_callback = callback
         
         for controller in self._controllers:
+            # 设置设备发现回调
             controller.set_device_discovered_callback(self._handle_device_discovery)
 
     def _handle_device_discovery(self, device: DayBetterDevice, is_new: bool) -> None:
         """处理设备发现"""
         fingerprint = device.fingerprint
         current_time = time.time()
+        
+        _LOGGER.debug("Device discovered: %s, is_new: %s", fingerprint, is_new)
         
         # 添加到已知设备列表
         if fingerprint not in self._known_devices:
@@ -100,23 +110,59 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
         # 初始化或更新设备状态缓存
         self._update_device_state_cache(device)
         
-        # 设置设备状态更新回调
-        def device_update_callback(updated_device: DayBetterDevice):
-            self._handle_device_update(updated_device)
-        
-        # 先移除现有的回调（如果有），然后重新设置
-        device.set_update_callback(device_update_callback)
-        
         # 如果是新设备且外部有发现回调，调用它
         if is_new and self._discovery_callback:
             self._discovery_callback(device, is_new)
         elif not is_new:
             # 已知设备重新上线，通知所有实体
             self._notify_device_entities(fingerprint)
-            _LOGGER.debug("Device %s reconnected", fingerprint)
+            _LOGGER.info("Device %s reconnected", fingerprint)
+
+    async def _quick_check_loop(self):
+        """快速检查设备状态的循环"""
+        while True:
+            try:
+                await asyncio.sleep(QUICK_CHECK_INTERVAL)  # 5秒检查一次
+                await self._check_device_status()
+            except asyncio.CancelledError:
+                break
+            except Exception as ex:
+                _LOGGER.error("Error in quick check loop: %s", ex)
+                await asyncio.sleep(5)
+
+    async def _check_device_status(self):
+        """检查设备状态"""
+        current_time = time.time()
+        changed_devices = []
+        
+        # 检查所有已知设备
+        for fingerprint in list(self._known_devices):
+            last_response = self._device_last_response.get(fingerprint, 0)
+            
+            # 判断设备是否在线
+            was_online = self._device_state_cache.get(fingerprint, {}).get('online', False)
+            is_online = current_time - last_response <= DEVICE_OFFLINE_THRESHOLD
+            
+            # 状态发生变化
+            if was_online != is_online:
+                # 更新缓存中的在线状态
+                if fingerprint in self._device_state_cache:
+                    self._device_state_cache[fingerprint]['online'] = is_online
+                    self._device_state_cache[fingerprint]['last_updated'] = current_time
+                    changed_devices.append(fingerprint)
+                    
+                    if is_online:
+                        _LOGGER.info("Device %s is now online", fingerprint)
+                    else:
+                        _LOGGER.info("Device %s is now offline (no response for %d seconds)", 
+                                   fingerprint, int(current_time - last_response))
+        
+        # 通知状态发生变化的设备实体
+        for fingerprint in changed_devices:
+            self._notify_device_entities(fingerprint)
 
     def _handle_device_update(self, device: DayBetterDevice) -> None:
-        """处理设备状态更新"""
+        """处理设备状态更新（通过UDP消息）"""
         fingerprint = device.fingerprint
         current_time = time.time()
         
@@ -129,8 +175,9 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
         # 通知所有注册的实体回调
         self._notify_device_entities(fingerprint)
         
-        _LOGGER.debug("Device %s updated: on=%s", 
-                     fingerprint, getattr(device, 'on', False))
+        _LOGGER.debug("Device %s updated via UDP: on=%s, brightness=%s", 
+                     fingerprint, getattr(device, 'on', False), 
+                     getattr(device, 'brightness', 0))
 
     def _update_device_state_cache(self, device: DayBetterDevice) -> None:
         """更新设备状态缓存"""
@@ -140,6 +187,7 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
         if fingerprint not in self._device_state_cache:
             self._device_state_cache[fingerprint] = {}
         
+        # 设备发送UDP消息，说明它是在线的
         self._device_state_cache[fingerprint].update({
             'on': getattr(device, 'on', False),
             'brightness': getattr(device, 'brightness', 0),
@@ -177,6 +225,10 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
 
     def cleanup(self) -> list[asyncio.Event]:
         """Stop and cleanup the coordinator."""
+        # 取消快速检查任务
+        if self._quick_check_task:
+            self._quick_check_task.cancel()
+        
         return [controller.cleanup() for controller in self._controllers]
 
     async def turn_on(self, device: DayBetterDevice) -> None:
@@ -279,6 +331,18 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
         devices: list[DayBetterDevice] = []
         for controller in self._controllers:
             devices = devices + controller.devices
+        
+        # 为所有发现的设备设置更新回调
+        for device in devices:
+            if not hasattr(device, '_update_callback_set') or not device._update_callback_set:
+                def make_callback(dev):
+                    def update_callback(updated_device):
+                        self._handle_device_update(updated_device)
+                    return update_callback
+                
+                device.set_update_callback(make_callback(device))
+                device._update_callback_set = True
+        
         return devices
 
     async def _async_update_data(self) -> list[DayBetterDevice]:
@@ -289,30 +353,26 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
         for controller in self._controllers:
             controller.send_update_message()
         
-        # 检查设备响应状态
-        for fingerprint in list(self._device_last_response.keys()):
-            last_response = self._device_last_response.get(fingerprint, 0)
-            # 如果超过90秒没有响应，认为设备离线
-            if current_time - last_response > 90:
-                if fingerprint in self._device_state_cache:
-                    # 标记为离线
-                    if self._device_state_cache[fingerprint].get('online', False):
-                        self._device_state_cache[fingerprint]['online'] = False
-                        self._device_state_cache[fingerprint]['last_updated'] = current_time
-                        # 通知实体设备离线
-                        self._notify_device_entities(fingerprint)
-                        _LOGGER.info("Device %s is now offline", fingerprint)
-        
         return self.devices
 
     def is_device_online(self, fingerprint: str) -> bool:
         """检查设备是否在线"""
         if fingerprint in self._device_state_cache:
+            # 检查最后响应时间
+            last_response = self._device_last_response.get(fingerprint, 0)
+            current_time = time.time()
+            
+            # 如果10秒内有响应，认为在线
+            if current_time - last_response <= DEVICE_OFFLINE_THRESHOLD:
+                return True
+            
+            # 否则返回缓存中的在线状态
             return self._device_state_cache[fingerprint].get('online', False)
+        
         return False
 
     def get_cached_device_state(self, fingerprint: str) -> dict:
-        """获取设备缓存状态（即使设备离线）"""
+        """获取设备缓存状态"""
         return self._device_state_cache.get(fingerprint, {})
 
     def get_device_by_fingerprint(self, fingerprint: str) -> Optional[DayBetterDevice]:
@@ -323,19 +383,5 @@ class DayBetterLocalApiCoordinator(DataUpdateCoordinator[list[DayBetterDevice]])
         return None
 
     def get_all_known_devices(self) -> list[str]:
-        """获取所有已知设备的指纹列表（包括离线的）"""
+        """获取所有已知设备的指纹列表"""
         return list(self._known_devices)
-
-    async def monitor_devices(self):
-        """监控设备状态的异步任务"""
-        while True:
-            try:
-                # 每30秒检查一次设备状态
-                await asyncio.sleep(10)
-                # 触发一次更新
-                await self.async_request_refresh()
-            except asyncio.CancelledError:
-                break
-            except Exception as ex:
-                _LOGGER.error("Error in device monitoring: %s", ex)
-                await asyncio.sleep(10)
